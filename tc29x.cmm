@@ -1,0 +1,526 @@
+; --------------------------------------------------------------------------------
+; @Title: Generic FLASH script file for TC29x devices
+; @Description:
+;   Script for flash declaration and programming of Infineon TriCore TC29x
+;   internal flash.
+; @Keywords: AURIX, AURIX1G, FLASH, internal, Infineon, TriCore
+; @Author: WRD, MOB, MAX
+; @Chip: TC29*
+; @Copyright: (C) 1989-2019 Lauterbach GmbH, licensed for use with TRACE32(R) only
+; --------------------------------------------------------------------------------
+; $Id: tc29x.cmm 7422 2019-09-25 18:24:00Z mobermaier $
+
+
+; Important information, read this before using this script:
+;
+;   Do not edit this script. Instead, call this script from your project using the
+;   command line arguments described below. See the TriBoard demo scripts for an
+;   example.
+;
+;   If changing the sector type from NOP to TARGET is required, use the command
+;   FLASH.CHANGETYPE instead of modifying this script.
+;
+;   This script checks the programmed application to avoid permanent locking of the
+;   device. This script is constantly improved, but it is not guaranteed that all
+;   cases are covered.
+;
+; Script arguments:
+;
+;   DO tc29x.cmm [PREPAREONLY] [CHECKBMHD] [CPU=<cpu>] [DUALPORT=0|1]
+;
+;     PREPAREONLY only declares flash but does not execute flash programming
+;
+;     CHECKBMHD only checks if at least one valid Boot Mode Header can be found.
+;             The script returns:
+;               BMHD_OK       if at least one valid Boot Mode Header was found
+;               BMHD_MISSING  if no valid Boot Mode Header was found
+;
+;     CPU=<cpu> selects CPU derivative <cpu>
+;
+;     DUALPORT default value is 0 (disabled). If DualPort mode is enabled
+;             flash algorithm stays running until flash programming is
+;             finished. Data is tranferred via dual port memory access.
+;
+; Example:
+;
+;   DO ~~/demo/tricore/flash/tc29x.cmm CPU=TC298TF DUALPORT=1 PREPAREONLY
+;
+; Supported devices:
+;
+;   All TC29x devices, e.g. TC298TF
+;
+; Program FLASH:
+;   FSIZE=0xB: 8 MB PFLASH at 0x80000000--0x807FFFFF (cached)
+;                          or 0xA0000000--0xA07FFFFF (non cached)
+;   FSIZE=0x9: 6 MB PFLASH at 0x80000000--0x805FFFFF (cached)
+;                          or 0xA0000000--0xA05FFFFF (non cached)
+;   FSIZE=0x7: 4 MB PFLASH at 0x80000000--0x803FFFFF (cached)
+;                          or 0xA0000000--0xA03FFFFF (non cached)
+;
+; Data FLASH:
+;   768 KByte DFLASH at 0xAF000000--0xAF0BFFFF (EEPROM)
+;       or
+;   192 KByte DFLASH at 0xAF000000--0xAF02FFFF (EEPROM)
+;    64 KByte DFLASH at 0xAF110000--0xAF11FFFF (HSM)
+;
+; Configuration FLASH sectors:
+;   UCB sectors at 0xAF100000--0xAF103FFF
+;
+; RAM (minimum Scratch-Pad RAM):
+;   112 KByte DSPR (Data Scratch-Pad RAM)        at 0xD0000000--0xD001BFFF
+;    24 KByte PSPR (Instruction Scratch-Pad RAM) at 0xC0000000--0xC0005FFF
+;
+; CAUTION:
+;
+;   Do not reboot or unpower your device in case all BMHD (Boot Mode Headers)
+;   do not contain valid information. This is normally the case after having
+;   erased the internal program flash or loading an object or binary file
+;   without a valid BMHD. The BMHD are located at:
+;     BMHD0 0xA0000000--0xA000001F
+;     BMHD1 0xA0020000--0xA002001F
+;     BMHD2 0xA000FFE0--0xA000FFFF
+;     BMHD3 0xA001FFE0--0xA001FFFF
+;   See the Infineon documentation for more information.
+;
+;   Do not enable HSM boot when no valid HSM code is present. This will lock
+;   your device permanently. See the Infineon documentation and contact your
+;   Infineon FAE for more information on HSM.
+;   See ~~/demo/tricore/flash/tc29x-hsm.cmm for programming the HSM.
+;
+;   Pay special attention when modifying the UCB. An invalid or erroneous
+;   content will lock your device permanently. This also happens in case the
+;   confirmation code is neither "unlocked" nor "confirmed". See the Infineon
+;   documentation for more information.
+;   See ~~/demo/tricore/flash/tc2xx-ucb.cmm for programming the UCB.
+;
+; HINTS:
+;
+;   Erased PFLASH is showing bus error caused by ECC error. The ECC width of
+;   PFLASH an aligned group of 32 bytes.
+;
+;   The flash algorithm is programming PFLASH in an aligned group of 32 bytes.
+;   When using FLASH.Program command the download has to care about this
+;   alignment.
+
+LOCAL &parameters &param_prepareonly &param_checkbmhd &param_cpu &param_dualport
+ENTRY %LINE &parameters
+
+&param_prepareonly=(STRing.SCAN(STRing.UPpeR("&parameters"),"PREPAREONLY",0)!=-1)
+&param_checkbmhd=(STRing.SCAN(STRing.UPpeR("&parameters"),"CHECKBMHD",0)!=-1)
+&param_cpu=STRing.SCANAndExtract(STRing.UPpeR("&parameters"),"CPU=","")
+&param_dualport=0
+IF VERSION.BUILD.BASE()>=48610.
+  &param_dualport=STRing.SCANAndExtract(STRing.UPpeR("&parameters"),"DUALPORT=","0")
+
+LOCAL &SCU_CHIPID &CHREV &FSIZE &DSIZE
+&SCU_CHIPID=0x0
+&CHREV=0x0
+&FSIZE=0x0
+&DSIZE=0.
+
+; --------------------------------------------------------------------------------
+; Initialize
+
+IF SYStem.MODE()<5.
+(
+  IF !interface.HOSTMCI()
+    SYStem.RESet
+
+  IF "&param_cpu"!=""
+    SYStem.CPU &param_cpu
+  IF !CPUIS(TC29*)
+    SYStem.CPU TC29*
+
+  CORE.select 0. ; CPU0 is selected for flash programming.
+  SYStem.Up
+)
+
+LOCAL &CustomerSpecific
+&CustomerSpecific=FALSE()
+IF CPUIS("TC2???C")
+  &CustomerSpecific=TRUE()
+
+IF &param_checkbmhd
+(
+  LOCAL &validBmhdFound
+  GOSUB CheckAllBootModeHeaders
+  ENTRY &validBmhdFound
+  IF &validBmhdFound
+    ENDDO BMHD_OK
+  ENDDO BMHD_MISSING
+)
+
+; Disable Watchdog Timers on TC29x
+
+; Disable Safety Watchdog Timer (overall system level watchdog)
+PER.Set.simple D:0xF00360F4 %Long 0x00000008  ; SCU_WDTSCON1, Request to disable the WDT
+; Disable CPU Watchdog Timer
+PER.Set.simple D:0xF0036104 %Long 0x00000008  ; SCU_WDTCPU0CON1, Request to disable the WDT
+PER.Set.simple D:0xF0036110 %Long 0x00000008  ; SCU_WDTCPU1CON1, Request to disable the WDT
+PER.Set.simple D:0xF003611C %Long 0x00000008  ; SCU_WDTCPU2CON1, Request to disable the WDT
+
+; --------------------------------------------------------------------------------
+; FLASH Declaration
+
+; Get FLASH sizes from chip
+GOSUB ReadChipId
+&DSIZE=128. ; 786 KB DFLASH
+IF (&CustomerSpecific)
+  &DSIZE=32. ; 192 KB DFLASH
+
+FLASH.RESet
+
+; Program FLASH
+IF (&FSIZE==0xB) ; 8 MB PFLASH - TC29x 128F
+(
+  ; Program flash PF0
+  FLASH.Create  1. 0xA0000000--0xA000BFFF  0x4000 TARGET Long /BootModeHeaDer 0xA0000000--0xA000001F  ; PS0, S0..S2
+  FLASH.Create  1. 0xA000C000--0xA0013FFF  0x4000 TARGET Long /BootModeHeaDer 0xA000FFE0--0xA000FFFF  ; PS0, S3..S4
+  FLASH.Create  1. 0xA0014000--0xA0017FFF  0x4000 NOP    Long /INFO "Tuning Protection"               ; PS0, S5
+  FLASH.Create  1. 0xA0018000--0xA001BFFF  0x4000 NOP    Long /INFO "HSM code sector"                 ; PS0, S6
+  FLASH.Create  1. 0xA001C000--0xA001FFFF  0x4000 TARGET Long /BootModeHeaDer 0xA001FFE0--0xA001FFFF  ; PS0, S7
+  FLASH.Create  1. 0xA0020000--0xA005FFFF  0x8000 TARGET Long /BootModeHeaDer 0xA0020000--0xA002001F  ; PS0, S8..S15
+  FLASH.Create  1. 0xA0060000--0xA007FFFF 0x10000 NOP    Long /INFO "HSM code sector"                 ; PS0, S16..S17
+  FLASH.Create  2. 0xA0080000--0xA009FFFF 0x10000 TARGET Long  ; PS1, S18..S19
+  FLASH.Create  2. 0xA00A0000--0xA00FFFFF 0x20000 TARGET Long  ; PS1, S20..S22
+  FLASH.Create  3. 0xA0100000--0xA017FFFF 0x40000 TARGET Long  ; PS2, S23..S24
+  FLASH.Create  4. 0xA0180000--0xA01FFFFF 0x40000 TARGET Long  ; PS3, S25..S26
+  ; Program flash PF1
+  FLASH.Create  5. 0xA0200000--0xA021FFFF  0x4000 TARGET Long  ; PS0, S0..S7
+  FLASH.Create  5. 0xA0220000--0xA025FFFF  0x8000 TARGET Long  ; PS0, S8..S15
+  FLASH.Create  5. 0xA0260000--0xA027FFFF 0x10000 TARGET Long  ; PS0, S16..S17
+  FLASH.Create  6. 0xA0280000--0xA029FFFF 0x10000 TARGET Long  ; PS1, S18..S19
+  FLASH.Create  6. 0xA02A0000--0xA02FFFFF 0x20000 TARGET Long  ; PS1, S20..S22
+  FLASH.Create  7. 0xA0300000--0xA037FFFF 0x40000 TARGET Long  ; PS2, S23..S24
+  FLASH.Create  8. 0xA0380000--0xA03FFFFF 0x40000 TARGET Long  ; PS3, S25..S26
+  ; Program flash PF2
+  FLASH.Create  9. 0xA0400000--0xA041FFFF  0x4000 TARGET Long  ; PS0, S0..S7
+  FLASH.Create  9. 0xA0420000--0xA045FFFF  0x8000 TARGET Long  ; PS0, S8..S15
+  FLASH.Create  9. 0xA0460000--0xA047FFFF 0x10000 TARGET Long  ; PS0, S16..S17
+  FLASH.Create 10. 0xA0480000--0xA049FFFF 0x10000 TARGET Long  ; PS1, S18..S19
+  FLASH.Create 10. 0xA04A0000--0xA04FFFFF 0x20000 TARGET Long  ; PS1, S20..S22
+  FLASH.Create 11. 0xA0500000--0xA057FFFF 0x40000 TARGET Long  ; PS2, S23..S24
+  FLASH.Create 12. 0xA0580000--0xA05FFFFF 0x40000 TARGET Long  ; PS3, S25..S26
+  ; Program flash PF3
+  FLASH.Create 13. 0xA0600000--0xA061FFFF  0x4000 TARGET Long  ; PS0, S0..S7
+  FLASH.Create 13. 0xA0620000--0xA065FFFF  0x8000 TARGET Long  ; PS0, S8..S15
+  FLASH.Create 13. 0xA0660000--0xA067FFFF 0x10000 TARGET Long  ; PS0, S16..S17
+  FLASH.Create 14. 0xA0680000--0xA069FFFF 0x10000 TARGET Long  ; PS1, S18..S19
+  FLASH.Create 14. 0xA06A0000--0xA06FFFFF 0x20000 TARGET Long  ; PS1, S20..S22
+  FLASH.Create 15. 0xA0700000--0xA077FFFF 0x40000 TARGET Long  ; PS2, S23..S24
+  FLASH.Create 16. 0xA0780000--0xA07FFFFF 0x40000 TARGET Long  ; PS3, S25..S26
+)
+ELSE IF (&FSIZE==0x9) ; 6 MB PFLASH - TC29x 96F
+(
+  ; Program flash PF0
+  FLASH.Create  1. 0xA0000000--0xA000BFFF  0x4000 TARGET Long /BootModeHeaDer 0xA0000000--0xA000001F  ; PS0, S0..S2
+  FLASH.Create  1. 0xA000C000--0xA0013FFF  0x4000 TARGET Long /BootModeHeaDer 0xA000FFE0--0xA000FFFF  ; PS0, S3..S4
+  FLASH.Create  1. 0xA0014000--0xA0017FFF  0x4000 NOP    Long /INFO "Tuning Protection"               ; PS0, S5
+  FLASH.Create  1. 0xA0018000--0xA001BFFF  0x4000 NOP    Long /INFO "HSM code sector"                 ; PS0, S6
+  FLASH.Create  1. 0xA001C000--0xA001FFFF  0x4000 TARGET Long /BootModeHeaDer 0xA001FFE0--0xA001FFFF  ; PS0, S7
+  FLASH.Create  1. 0xA0020000--0xA005FFFF  0x8000 TARGET Long /BootModeHeaDer 0xA0020000--0xA002001F  ; PS0, S8..S15
+  FLASH.Create  1. 0xA0060000--0xA007FFFF 0x10000 NOP    Long /INFO "HSM code sector"                 ; PS0, S16..S17
+  FLASH.Create  2. 0xA0080000--0xA009FFFF 0x10000 TARGET Long  ; PS1, S18..S19
+  FLASH.Create  2. 0xA00A0000--0xA00FFFFF 0x20000 TARGET Long  ; PS1, S20..S22
+  FLASH.Create  3. 0xA0100000--0xA017FFFF 0x40000 TARGET Long  ; PS2, S23..S24
+  FLASH.Create  4. 0xA0180000--0xA01FFFFF 0x40000 TARGET Long  ; PS3, S25..S26
+  ; Program flash PF1
+  FLASH.Create  5. 0xA0200000--0xA021FFFF  0x4000 TARGET Long  ; PS0, S0..S7
+  FLASH.Create  5. 0xA0220000--0xA025FFFF  0x8000 TARGET Long  ; PS0, S8..S15
+  FLASH.Create  5. 0xA0260000--0xA027FFFF 0x10000 TARGET Long  ; PS0, S16..S17
+  FLASH.Create  6. 0xA0280000--0xA029FFFF 0x10000 TARGET Long  ; PS1, S18..S19
+  FLASH.Create  6. 0xA02A0000--0xA02FFFFF 0x20000 TARGET Long  ; PS1, S20..S22
+  FLASH.Create  7. 0xA0300000--0xA037FFFF 0x40000 TARGET Long  ; PS2, S23..S24
+  FLASH.Create  8. 0xA0380000--0xA03FFFFF 0x40000 TARGET Long  ; PS3, S25..S26
+  ; Program flash PF2
+  FLASH.Create  9. 0xA0400000--0xA041FFFF  0x4000 TARGET Long  ; PS0, S0..S7
+  FLASH.Create  9. 0xA0420000--0xA045FFFF  0x8000 TARGET Long  ; PS0, S8..S15
+  FLASH.Create  9. 0xA0460000--0xA047FFFF 0x10000 TARGET Long  ; PS0, S16..S17
+  FLASH.Create 10. 0xA0480000--0xA049FFFF 0x10000 TARGET Long  ; PS1, S18..S19
+  FLASH.Create 10. 0xA04A0000--0xA04FFFFF 0x20000 TARGET Long  ; PS1, S20..S22
+  FLASH.Create 11. 0xA0500000--0xA057FFFF 0x40000 TARGET Long  ; PS2, S23..S24
+  FLASH.Create 12. 0xA0580000--0xA05FFFFF 0x40000 TARGET Long  ; PS3, S25..S26
+)
+ELSE IF (&FSIZE==0x7) ; 4 MB PFLASH - TC29x 64F
+(
+  ; Program flash PF0
+  FLASH.Create  1. 0xA0000000--0xA000BFFF  0x4000 TARGET Long /BootModeHeaDer 0xA0000000--0xA000001F  ; PS0, S0..S2
+  FLASH.Create  1. 0xA000C000--0xA0013FFF  0x4000 TARGET Long /BootModeHeaDer 0xA000FFE0--0xA000FFFF  ; PS0, S3..S4
+  FLASH.Create  1. 0xA0014000--0xA0017FFF  0x4000 NOP    Long /INFO "Tuning Protection"               ; PS0, S5
+  FLASH.Create  1. 0xA0018000--0xA001BFFF  0x4000 NOP    Long /INFO "HSM code sector"                 ; PS0, S6
+  FLASH.Create  1. 0xA001C000--0xA001FFFF  0x4000 TARGET Long /BootModeHeaDer 0xA001FFE0--0xA001FFFF  ; PS0, S7
+  FLASH.Create  1. 0xA0020000--0xA005FFFF  0x8000 TARGET Long /BootModeHeaDer 0xA0020000--0xA002001F  ; PS0, S8..S15
+  FLASH.Create  1. 0xA0060000--0xA007FFFF 0x10000 NOP    Long /INFO "HSM code sector"                 ; PS0, S16..S17
+  FLASH.Create  2. 0xA0080000--0xA009FFFF 0x10000 TARGET Long  ; PS1, S18..S19
+  FLASH.Create  2. 0xA00A0000--0xA00FFFFF 0x20000 TARGET Long  ; PS1, S20..S22
+  FLASH.Create  3. 0xA0100000--0xA017FFFF 0x40000 TARGET Long  ; PS2, S23..S24
+  FLASH.Create  4. 0xA0180000--0xA01FFFFF 0x40000 TARGET Long  ; PS3, S25..S26
+  ; Program flash PF1
+  FLASH.Create  5. 0xA0200000--0xA021FFFF  0x4000 TARGET Long  ; PS0, S0..S7
+  FLASH.Create  5. 0xA0220000--0xA025FFFF  0x8000 TARGET Long  ; PS0, S8..S15
+  FLASH.Create  5. 0xA0260000--0xA027FFFF 0x10000 TARGET Long  ; PS0, S16..S17
+  FLASH.Create  6. 0xA0280000--0xA029FFFF 0x10000 TARGET Long  ; PS1, S18..S19
+  FLASH.Create  6. 0xA02A0000--0xA02FFFFF 0x20000 TARGET Long  ; PS1, S20..S22
+  FLASH.Create  7. 0xA0300000--0xA037FFFF 0x40000 TARGET Long  ; PS2, S23..S24
+  FLASH.Create  8. 0xA0380000--0xA03FFFFF 0x40000 TARGET Long  ; PS3, S25..S26
+)
+ELSE
+(
+  PRINT %ERROR "unsupported PFLASH size &FSIZE"
+  ENDDO "UNSUPPORTED"
+)
+
+; Cached program flash address range
+FLASH.CreateALIAS 0x80000000--0x80FFFFFF 0xA0000000
+
+; Data FLASH DF0
+IF (&DSIZE==128.) ; 768 KB DFLASH - (128 KB @ 500k)
+  FLASH.Create 17. 0xAF000000--0xAF0BFFFF  0x2000 TARGET Long /INFO "EEPROM"  ; DF0, EEPROM0..EEPROM95
+ELSE IF (&DSIZE==32.) ; 192 KB DFLASH - (32 KB @ 500k)
+  FLASH.Create 17. 0xAF000000--0xAF02FFFF  0x2000 TARGET Long /INFO "EEPROM"  ; DF0, EEPROM0..EEPROM23
+ELSE
+(
+  PRINT %ERROR "unspported DFLASH size &DSIZE"
+  ENDDO "UNSUPPORTED"
+)
+FLASH.Create 18. 0xAF100000--0xAF1003FF   0x400 NOP    Long /INFO "UCB_PFlash"     ; DF0, UCB0
+FLASH.Create 18. 0xAF100400--0xAF1007FF   0x400 NOP    Long /INFO "UCB_DFlash"     ; DF0, UCB1
+FLASH.Create 18. 0xAF100800--0xAF100BFF   0x400 NOP    Long /INFO "UCB_HSMCOTP"    ; DF0, UCB2
+FLASH.Create 18. 0xAF100C00--0xAF100FFF   0x400 NOP    Long /INFO "UCB_OTP"        ; DF0, UCB3
+FLASH.Create 18. 0xAF101000--0xAF1013FF   0x400 NOP    Long /INFO "UCB_IFX"        ; DF0, UCB4
+FLASH.Create 18. 0xAF101400--0xAF1017FF   0x400 NOP    Long /INFO "UCB_DBG"        ; DF0, UCB5
+FLASH.Create 18. 0xAF101800--0xAF101BFF   0x400 NOP    Long /INFO "UCB_HSM"        ; DF0, UCB6
+FLASH.Create 18. 0xAF101C00--0xAF101FFF   0x400 NOP    Long /INFO "UCB_HSMCFG"     ; DF0, UCB7
+FLASH.Create 18. 0xAF102000--0xAF102FFF   0x400 NOP    Long                        ; DF0, UCB8..UCB11
+FLASH.Create 18. 0xAF103000--0xAF103FFF   0x400 NOP    Long /INFO "Erase Counter"  ; DF0, UCB12..UCB15
+; Data FLASH DF1
+FLASH.Create 19. 0xAF110000--0xAF11FFFF  0x2000 NOP    Long /INFO "HSM"            ; DF1, HSM0..HSM7
+
+; HSM private access to DF1
+FLASH.CreateALIAS 0xFF110000--0xFF11FFFF 0xAF110000
+
+IF &param_dualport==0
+  FLASH.TARGET 0xC0000000 0xD0000000 0x4000 ~~/demo/tricore/flash/long/tc2.bin
+ELSE
+  FLASH.TARGET 0xC0000000 0xD0000000 0x4000 ~~/demo/tricore/flash/long/tc2.bin /DualPort
+
+; Initialize PSPR & DSPR ECC (if required)
+GOSUB InitSPR
+
+; FLASH script ends here if called with parameter PREPAREONLY
+IF &param_prepareonly
+  ENDDO PREPAREDONE
+
+; --------------------------------------------------------------------------------
+; download application
+
+DIALOG.YESNO "Program internal flash memory?"
+LOCAL &progflash
+ENTRY &progflash
+IF &progflash
+(
+  ; Enable flash programming
+  FLASH.ReProgram.ALL
+
+  Data.LOAD.auto debug\ads_tc29x_asclin.elf 
+  ;Data.LOAD.auto *
+
+  ; Use the following commands to manually program a valid default BMHD (see comment above)
+  ; Data.Set 0xA0000000++0x17 %Long 0xA0000020 0xB3590070 0x00000000 0x00000000 0x00000000 0x00000000
+  ; Data.SUM 0xA0000000++0x17 /Long /ByteSWAP /CRC32
+  ; Data.Set 0xA0000018 %Long Data.SUM()
+  ; Data.Set 0xA000001C %Long ~Data.SUM()
+
+  GOSUB CheckAllBootModeHeaders
+  ENTRY &progflash
+  IF !&progflash
+  (
+    DIALOG.YESNO "No valid Boot Mode Header found!" \
+                 "FLASH programming now can lock your device." \
+                 "Do you really want to program flash?"
+    ENTRY &progflash
+  )
+
+  IF &progflash
+  (
+    ; Finally program flash memory
+    FLASH.ReProgram.off
+  )
+  ELSE
+  (
+    ; Revert loaded data
+    IF VERSION.BUILD()>=51257.
+      FLASH.ReProgram.CANCEL
+    ELSE
+    (
+      FLASH.ReProgram.ALL
+      FLASH.ReProgram.off
+    )
+  )
+)
+
+ENDDO
+
+; --------------------------------------------------------------------------------
+; Read the CHIPID register and get information on revision and FLASH size.
+; Writes results to script-local macros SCU_CHIPID, CHREV and FSIZE.
+
+ReadChipId:
+(
+    &SCU_CHIPID=Data.Long(D:0xF0036140)
+    &CHREV=(&SCU_CHIPID)&(0x3F)
+    &FSIZE=((&SCU_CHIPID)>>24.)&(0xF)
+    RETURN
+)
+
+; --------------------------------------------------------------------------------
+; Check if at least one valid boot mode header is available
+
+CheckAllBootModeHeaders:
+(
+  LOCAL &bmhdValid
+  GOSUB CheckBootModeHeader 0xA0000000
+  ENTRY &bmhdValid
+  IF &bmhdValid
+    RETURN &bmhdValid
+  GOSUB CheckBootModeHeader 0xA0020000
+  ENTRY &bmhdValid
+  IF &bmhdValid
+    RETURN &bmhdValid
+  GOSUB CheckBootModeHeader 0xA000FFE0
+  ENTRY &bmhdValid
+  IF &bmhdValid
+    RETURN &bmhdValid
+  GOSUB CheckBootModeHeader 0xA001FFE0
+  ENTRY &bmhdValid
+  RETURN &bmhdValid
+)
+
+; --------------------------------------------------------------------------------
+; Check if Boot Mode Header has valid contents
+
+CheckBootModeHeader:
+(
+  LOCAL &addr &result &bmhdid
+  ENTRY &addr
+  &result=TRUE()
+
+  ON.ERROR GOSUB
+  (
+    &result=FALSE()
+    RETURN
+  )
+
+  IF !STRing.FIND("&addr",":")
+    &addr="C:&addr"
+
+  ; Check Boot Mode Header ID
+  &bmhdid=Data.Word(&addr+0x6)
+  IF &result
+  (
+    IF &bmhdid!=0xB359
+      &result=FALSE()
+  )
+
+  ; Check Boot Mode Header CRC
+  IF &result
+  (
+    Data.SUM &addr++0x17 /Long /ByteSWAP /CRC32
+    IF &result
+    (
+      Data.Set &addr+0x18 %Long Data.SUM() /DIFF
+      IF &result
+      (
+        &result=!FOUND()
+        IF &result
+        (
+          Data.Set &addr+0x1C %Long ~Data.SUM() /DIFF
+          IF &result
+          (
+            &result=!FOUND()
+          )
+        )
+      )
+    )
+  )
+
+  RETURN &result
+)
+
+; --------------------------------------------------------------------------------
+; Initialize Program- and Data Scratch Pad RAM
+; Initialization of PSRR and/or DSPR can be disabeld by BMHD, which causes bus
+; errors when loading the FLASH algorithm and contents to these RAMs.
+;
+InitSPR:
+(
+  PRIVATE &FLASH0_PROCOND &FLASH0_PROCOND_RAMIN &FLASH0_PROCOND_RAMINSEL
+  PRIVATE &MTU_CLC_Addr &MTU_CLC &MTU_MC_CPUx_DSPR_ECCD &MTU_MC_CPUx_PSPR_ECCD
+  PRIVATE &MTU_MC_CPUx_PSPR_ECCD_Addr &MTU_MC_CPUx_DSPR_ECCD_Addr
+
+  &FLASH0_PROCOND=Data.Long(D:0xF8002030)
+  &FLASH0_PROCOND_RAMIN=(&FLASH0_PROCOND>>2.)&0x3
+  &FLASH0_PROCOND_RAMINSEL=(&FLASH0_PROCOND>>4.)&0xF
+  &MTU_MC_CPUx_PSPR_ECCD_Addr="<unset>"
+  &MTU_MC_CPUx_DSPR_ECCD_Addr="<unset>"
+
+  IF (&FLASH0_PROCOND_RAMIN==0x0)&&((&FLASH0_PROCOND_RAMINSEL&(1.<<CORE.LOGICALTOPHYSICAL(CORE())))==0.)
+  (
+    ; RAM was already initialized at reset -> no need for extra initialization
+    RETURN
+  )
+
+  ; otherwise temporarily disable ECC for PSPR and DSPR
+  &MTU_CLC_Addr="D:0xF0060000"
+  &MTU_CLC=Data.Long(&MTU_CLC_Addr)
+
+  ; activate MTU by MTU_CLC = 0x0
+  PER.Set.simple &MTU_CLC_Addr %Long 0x0
+
+  ; determine register addresses based on selected core
+  IF (CORE.LOGICALTOPHYSICAL(CORE())==0)
+  (
+    &MTU_MC_CPUx_PSPR_ECCD_Addr="D:0xF0062010"
+    &MTU_MC_CPUx_DSPR_ECCD_Addr="D:0xF0061E10"
+  )
+  ELSE IF (CORE.LOGICALTOPHYSICAL(CORE())==1)
+  (
+    &MTU_MC_CPUx_PSPR_ECCD_Addr="D:0xF0061910"
+    &MTU_MC_CPUx_DSPR_ECCD_Addr="D:0xF0061610"
+  )
+  ELSE IF (CORE.LOGICALTOPHYSICAL(CORE())==2)
+  (
+    &MTU_MC_CPUx_PSPR_ECCD_Addr="D:0xF0061310"
+    &MTU_MC_CPUx_DSPR_ECCD_Addr="D:0xF0061010"
+  )
+
+  ; save MC_CPUx_PSPR_ECCD and MC_CPUx_DSPR_ECCD
+  &MTU_MC_CPUx_PSPR_ECCD=Data.Word(&MTU_MC_CPUx_PSPR_ECCD_Addr)
+  &MTU_MC_CPUx_DSPR_ECCD=Data.Word(&MTU_MC_CPUx_DSPR_ECCD_Addr)
+
+  ; MC_CPUx_PSPR_ECCD.CENE = 0
+  ; MC_CPUx_PSPR_ECCD.UENE = 0
+  PER.Set.simple &MTU_MC_CPUx_PSPR_ECCD_Addr %Word &MTU_MC_CPUx_PSPR_ECCD&(~(3.<<11.))
+
+  ; MC_CPUx_DSPR_ECCD.CENE = 0
+  ; MC_CPUx_DSPR_ECCD.UENE = 0
+  PER.Set.simple &MTU_MC_CPUx_DSPR_ECCD_Addr %Word &MTU_MC_CPUx_DSPR_ECCD&(~(3.<<11.))
+
+  IF VERSION.BUILD()<89348.
+  (
+    Data.Set C:0xC0000000++0x7FFF %Quad 0x0
+    Data.Set C:0xD0000000++0x7FFF %Quad 0x0
+  )
+  ELSE
+  (
+    Data.Set FLASH.TARGET.CODERANGE() %Quad 0x0
+    Data.Set FLASH.TARGET.DATARANGE() %Quad 0x0
+  )
+
+  ; restore MC_CPUx_PSPR_ECCD and MC_CPUx_DSPR_ECCD
+  PER.Set.simple &MTU_MC_CPUx_PSPR_ECCD_Addr %Word &MTU_MC_CPUx_PSPR_ECCD
+  PER.Set.simple &MTU_MC_CPUx_DSPR_ECCD_Addr %Word &MTU_MC_CPUx_DSPR_ECCD
+  PER.Set.simple &MTU_CLC_Addr %Long &MTU_CLC
+
+  RETURN
+)

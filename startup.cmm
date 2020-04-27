@@ -1,0 +1,49 @@
+// T32 Wed Jul 26 11:36:00 2017
+
+ B::
+ SYS.Down
+
+TOOLBAR   ON
+STATUSBAR ON
+FramePOS 38.714 6.4167 288. 86.
+WinPAGE.RESet
+
+WinPAGE.Create P000
+WinCLEAR
+
+WinPOS 125.43 0.66667 67. 26. 13. 1. W004
+Data.dump (0xa0060000) /DIALOG
+
+WinPOS 224.29 0.16667 54. 22. 0. 0. W002
+Register
+
+WinPOS 1.8571 74.333 118. 1. 0. 0. W000
+CD.PEDIT tc29x.cmm
+
+WinPOS 1.8571 0.083333 118. 67. 13. 1. W001
+WinTABS 10. 10. 25.
+List.auto
+
+WinPOS 125.43 34.167 100. 28. 0. 0. W005
+Var.Watch
+
+ VAR.ADDWATCH %e test
+ VAR.ADDWATCH %e cnt
+ VAR.ADDWATCH %e ASCLIN3_errorCount
+ VAR.ADDWATCH %e ASCLIN3_rxDmaCnt
+ VAR.ADDWATCH %e ASCLIN3_txDmaCnt
+; VAR.ADDWATCH %e %hex cmd
+
+ WinPAGE.select P000
+
+ SYS.CPU TC297TP
+ sys.CONFIG CORE 1. 1.
+ CORE.ASSIGN 1. 2. 3.
+ sys.config.debugporttype DAP3
+ sys.option.resb RUNRESTORE 
+ setup.tabsize 2
+ SYS.UP
+
+ Data.LOAD.auto debug\ads_tc29x_asclin.elf /nocode
+ 
+ ENDDO
