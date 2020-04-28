@@ -226,7 +226,7 @@ void ASCLIN3_Init (void)
     for (uint32 i=0; i < 200;i++)
       txData[i] = (uint8)i;
 
-    ASCLIN3_DMA_Init(200);
+    ASCLIN3_DMA_Init(10);
 }
 
 

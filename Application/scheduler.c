@@ -43,18 +43,23 @@
 
 volatile uint32 cnt;
 volatile uint32 test;
+volatile uint16 txCnt;
 
 extern void ASCLIN3_DMA_Init(uint16 trel);
 
-/*! \fn
- *  \brief
+/*! \fn void scheduler(void)
+ *  \brief This is simple loop for CPU0 to allow user input from a debugger.
+ *  The variable "test' is used to
  *  \param None
  *  \return Nothing
  */
 void scheduler(void)
 {
-	/* initialize ASCLIN0 to be used for UART communication with a host */
+	/* initialize ASCLIN0 to be used for UART communication using the DMA */
 	ASCLIN3_Init();
+
+	/*txCnt*/
+	txCnt = 10;
 
 	/* Enable global interrupts */
 	IfxCpu_enableInterrupts();
@@ -63,18 +68,24 @@ void scheduler(void)
 	{
 		if (test > 0)
 		{
-			/* user testing control */
+			/* user testing control, manipulated using a debugger */
 			switch (test)
 			{
 
 				case 1:
-				  ASCLIN3_DMA_Init(10);
+          /* Re-initialize the transmit transfer byte count to the value = to txCnt */
+				  ASCLIN3_DMA_Init(txCnt);
 					break;
 
-				case 2:
-				  SRC_ASCLIN3TX.U |= SETR;
-					break;
+        case 2:
+          /* Initiate the transmit transfer using the transmit FIFO level flag */
+          ASCLIN3_FLAGSSET.B.TFLS = 1;
+          break;
 
+        case 3:
+          /* Initiate the transmit transfer using the SRC interrupt node */
+          SRC_ASCLIN3TX.U |= SETR;
+          break;
 
 				default:
 					break;
