@@ -5,7 +5,7 @@ AURIX Development Studio (V1.1.10)
 This project is using reduced set of the iLLD's. 
 However the configuration of the ASCLIN and DMA peripherals are implemented as bare metal. 
 ## Hardware: 
-TC297TP BC TFT kit
+TC297TP BC TFT Application kit
 
 <img src="images/tc297_appkit.png" width="300" >
 
